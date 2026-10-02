@@ -1,0 +1,11 @@
+[Unit]
+Description=clipsync clipboard sync
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/clipsync
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
