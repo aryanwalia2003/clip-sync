@@ -1,4 +1,4 @@
-// clipsync: Linux clipboard <-> ntfy.sh topic <-> iPhone
+// clipsync: "clipsync" = phone ka text suno, "clipsync send" = clipboard phone ko bhejo
 package main
 
 import (
@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -24,18 +23,31 @@ const maxLen = 4096
 
 var (
 	server = flag.String("server", "https://ntfy.sh", "ntfy server url")
-	poll   = flag.Duration("poll", 500*time.Millisecond, "clipboard poll interval")
-
-	mu   sync.Mutex
-	last string // aakhri synced text, echo loop rokne ke liye
 )
 
 func main() {
 	flag.Parse()
 	topic := loadTopic()
-	log.Printf("topic: %s (phone pe yahi subscribe karo)", topic)
-	go subscribe(topic)
-	watch(topic)
+	if flag.Arg(0) == "send" {
+		if err := send(topic); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	log.Printf("topic: %s (phone pe yahi use karo)", topic)
+	subscribe(topic)
+}
+
+// hotkey se chalta hai, sirf jaan-boojh ke bhejna
+func send(topic string) error {
+	cur := readClip()
+	if cur == "" {
+		return fmt.Errorf("clipboard khali hai")
+	}
+	if len(cur) > maxLen {
+		return fmt.Errorf("%d bytes, limit %d", len(cur), maxLen)
+	}
+	return publish(topic, cur)
 }
 
 // topic file se padho, nahi mila to random bana ke save karo
@@ -74,32 +86,6 @@ func writeClip(s string) error {
 	cmd := exec.Command("xclip", "-selection", "clipboard", "-i")
 	cmd.Stdin = strings.NewReader(s)
 	return cmd.Run()
-}
-
-// laptop clipboard badle to ntfy pe bhejo
-func watch(topic string) {
-	mu.Lock()
-	last = readClip() // startup pe purana content mat bhejo
-	mu.Unlock()
-	for range time.Tick(*poll) {
-		cur := readClip()
-		mu.Lock()
-		skip := cur == "" || cur == last
-		if !skip {
-			last = cur
-		}
-		mu.Unlock()
-		if skip {
-			continue
-		}
-		if len(cur) > maxLen {
-			log.Printf("skip: %d bytes, limit %d", len(cur), maxLen)
-			continue
-		}
-		if err := publish(topic, cur); err != nil {
-			log.Printf("publish fail: %v", err)
-		}
-	}
 }
 
 func publish(topic, text string) error {
@@ -147,15 +133,6 @@ func stream(topic string) error {
 		msg, ok := parseEvent(sc.Bytes())
 		if !ok {
 			continue
-		}
-		mu.Lock()
-		same := msg == last
-		if !same {
-			last = msg
-		}
-		mu.Unlock()
-		if same {
-			continue // apna hi message wapas aaya
 		}
 		if err := writeClip(msg); err != nil {
 			log.Printf("clipboard write fail: %v", err)
