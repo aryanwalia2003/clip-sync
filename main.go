@@ -275,10 +275,31 @@ func saveFileToClip(name string, data []byte) error {
 		return err
 	}
 	u := url.URL{Scheme: "file", Path: path}
-	cmd := exec.Command("xclip", "-selection", "clipboard", "-t", "x-special/gnome-copied-files", "-i")
-	cmd.Stdin = strings.NewReader("copy\n" + u.String())
-	return cmd.Run()
+	cmd := exec.Command("python3", "-c", fileClipPy, u.String())
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go cmd.Wait() // clipboard owner badalne pe script khud band hoti hai
+	return nil
 }
+
+// xclip ek hi format deta hai, isliye GTK4 se dono: nautilus wala aur browser wala (text/uri-list)
+const fileClipPy = `
+import sys, gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk, Gdk, GLib
+Gtk.init()
+uri = sys.argv[1]
+def prov(mime, text):
+    return Gdk.ContentProvider.new_for_bytes(mime, GLib.Bytes.new(text.encode()))
+cb = Gdk.Display.get_default().get_clipboard()
+cb.set_content(Gdk.ContentProvider.new_union([
+    prov("x-special/gnome-copied-files", "copy\n" + uri),
+    prov("text/uri-list", uri + "\r\n")]))
+loop = GLib.MainLoop()
+cb.connect("changed", lambda c: None if c.is_local() else loop.quit())
+loop.run()
+`
 
 // png/jpeg/gif ko png bana do, xclip apps png hi maante hain
 func toPNG(data []byte) ([]byte, error) {
