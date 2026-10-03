@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ntfy ka message limit 4096 bytes hai
@@ -35,34 +36,98 @@ func main() {
 	flag.Parse()
 	topic := loadTopic()
 	if flag.Arg(0) == "send" {
-		if err := send(topic); err != nil {
+		desc, err := send(topic)
+		if err != nil {
+			notify("Bhejna fail: " + err.Error())
 			log.Fatal(err)
 		}
+		notify(desc)
 		return
 	}
 	log.Printf("topic: %s (phone pe yahi use karo)", topic)
 	subscribe(topic)
 }
 
-// hotkey se chalta hai, sirf jaan-boojh ke bhejna
-func send(topic string) error {
+// desktop notification gdbus se (libnotify-bin ki zaroorat nahi), na ho to chup-chaap skip
+func notify(msg string) {
+	q := "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(msg) + "'" // GVariant string quote
+	exec.Command("gdbus", "call", "--session",
+		"--dest", "org.freedesktop.Notifications", "--object-path", "/org/freedesktop/Notifications",
+		"--method", "org.freedesktop.Notifications.Notify",
+		"clipsync", "0", "", "clipsync", q, "[]", "{}", "5000").Run()
+}
+
+// hotkey se chalta hai, sirf jaan-boojh ke bhejna. files > image > text
+func send(topic string) (string, error) {
+	if files := copiedFiles(); len(files) > 0 {
+		for _, p := range files {
+			data, err := readFile(p)
+			if err != nil {
+				return "", err
+			}
+			if err := publishFile(topic, filepath.Base(p), data); err != nil {
+				return "", err
+			}
+		}
+		return fmt.Sprintf("Phone ko bheji: %d file", len(files)), nil
+	}
 	for _, t := range []struct{ mime, name string }{{"image/png", "clip.png"}, {"image/jpeg", "clip.jpg"}} {
 		if hasTarget(t.mime) {
 			img, err := exec.Command("xclip", "-selection", "clipboard", "-t", t.mime, "-o").Output()
 			if err != nil {
-				return err
+				return "", err
 			}
-			return publishFile(topic, t.name, img)
+			return "Phone ko bheji: image", publishFile(topic, t.name, img)
 		}
 	}
 	cur := readClip()
 	if cur == "" {
-		return fmt.Errorf("clipboard khali hai")
+		return "", fmt.Errorf("clipboard khali hai")
 	}
-	if len(cur) > maxLen {
-		return fmt.Errorf("%d bytes, limit %d", len(cur), maxLen)
+	if len(cur) > maxLen { // bada text attachment ban ke jata hai
+		return fmt.Sprintf("Phone ko bheja: bada text (%d bytes)", len(cur)), publishFile(topic, "clip.txt", []byte(cur))
 	}
-	return publish(topic, cur)
+	return fmt.Sprintf("Phone ko bheja: text (%d chars)", utf8.RuneCountInString(cur)), publish(topic, cur)
+}
+
+// nautilus ki "copied files" clipboard se file paths nikalo
+func copiedFiles() []string {
+	if !hasTarget("x-special/gnome-copied-files") {
+		return nil
+	}
+	out, err := exec.Command("xclip", "-selection", "clipboard", "-t", "x-special/gnome-copied-files", "-o").Output()
+	if err != nil {
+		return nil
+	}
+	return parseCopiedFiles(string(out))
+}
+
+// format: pehli line "copy"/"cut", baaki file:// uri
+func parseCopiedFiles(s string) []string {
+	var paths []string
+	lines := strings.Split(strings.ReplaceAll(s, "\r", ""), "\n")
+	for _, l := range lines[1:] {
+		u, err := url.Parse(strings.TrimSpace(l))
+		if err != nil || u.Scheme != "file" || u.Path == "" {
+			continue
+		}
+		paths = append(paths, u.Path)
+	}
+	return paths
+}
+
+func readFile(path string) ([]byte, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi.IsDir() {
+		return nil, fmt.Errorf("%s folder hai, sirf files bhej sakte hain", filepath.Base(path))
+	}
+	if fi.Size() > maxFile {
+		return nil, fmt.Errorf("%s: %d bytes, limit %d", filepath.Base(path), fi.Size(), maxFile)
+	}
+	return os.ReadFile(path)
 }
 
 // topic file se padho, nahi mila to random bana ke save karo
@@ -126,15 +191,19 @@ func writeImage(png []byte) error {
 // ntfy attachment limit 15MB
 const maxFile = 15 << 20
 
+// laptop ke apne messages ka tag, daemon inhe skip karta hai (echo roko)
+const selfTag = "from-laptop"
+
 func publishFile(topic, name string, data []byte) error {
 	if len(data) > maxFile {
-		return fmt.Errorf("image %d bytes, limit %d", len(data), maxFile)
+		return fmt.Errorf("%s: %d bytes, limit %d", name, len(data), maxFile)
 	}
 	req, err := http.NewRequest(http.MethodPut, *server+"/"+topic, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Filename", name)
+	req.Header.Set("Tags", selfTag)
 	return do(req)
 }
 
@@ -144,6 +213,7 @@ func publish(topic, text string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Tags", selfTag)
 	return do(req)
 }
 
@@ -193,9 +263,13 @@ func stream(topic string) error {
 		if !ok {
 			continue
 		}
-		if err := apply(ev); err != nil {
+		desc, err := apply(ev)
+		if err != nil {
 			log.Printf("clipboard write fail: %v", err)
+			notify("Phone se aaya, par fail: " + err.Error())
+			continue
 		}
+		notify(desc)
 	}
 	return sc.Err()
 }
@@ -217,6 +291,7 @@ func parseEvent(line []byte) (event, bool) {
 		Event      string      `json:"event"`
 		Message    string      `json:"message"`
 		Attachment *attachment `json:"attachment"`
+		Tags       []string    `json:"tags"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(line), &ev); err != nil {
 		return event{}, false
@@ -224,37 +299,42 @@ func parseEvent(line []byte) (event, bool) {
 	if ev.Event != "message" || (ev.Message == "" && ev.Attachment == nil) {
 		return event{}, false
 	}
+	for _, t := range ev.Tags {
+		if t == selfTag {
+			return event{}, false // apna hi bheja hua
+		}
+	}
 	return event{ev.Message, ev.Attachment}, true
 }
 
-// text seedha, attachment download karke clipboard mein
-func apply(ev event) error {
+// text seedha, attachment download karke clipboard mein. desc notification ke liye
+func apply(ev event) (string, error) {
 	if ev.Att == nil {
-		return writeClip(ev.Message)
+		return fmt.Sprintf("Phone se aaya: text (%d chars)", utf8.RuneCountInString(ev.Message)), writeClip(ev.Message)
 	}
 	resp, err := http.Get(ev.Att.URL)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("attachment status %s", resp.Status)
+		return "", fmt.Errorf("attachment status %s", resp.Status)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFile))
 	if err != nil {
-		return err
+		return "", err
 	}
 	switch {
 	case strings.HasPrefix(ev.Att.Type, "image/"):
 		p, err := toPNG(data)
 		if err != nil {
-			return fmt.Errorf("%s: %w", ev.Att.Type, err) // HEIC jaisa format
+			return "", fmt.Errorf("%s: %w", ev.Att.Type, err) // HEIC jaisa format
 		}
-		return writeImage(p)
+		return "Phone se aayi: image", writeImage(p)
 	case strings.HasPrefix(ev.Att.Type, "text/"):
-		return writeClip(string(data))
+		return fmt.Sprintf("Phone se aaya: bada text (%d bytes)", len(data)), writeClip(string(data))
 	}
-	return saveFileToClip(ev.Att.Name, data)
+	return "Phone se aayi: file " + filepath.Base(ev.Att.Name) + " (~/Downloads/clipsync)", saveFileToClip(ev.Att.Name, data)
 }
 
 // baaki files (pdf etc) ~/Downloads/clipsync mein save, clipboard mein "copied file"

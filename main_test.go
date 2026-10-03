@@ -17,6 +17,8 @@ func TestParseEvent(t *testing.T) {
 	}{
 		{`{"event":"message","message":"hello"}`, "hello", "", true},
 		{`{"event":"message","message":"You received a file: a.png","attachment":{"type":"image/png","url":"http://x/a.png"}}`, "You received a file: a.png", "http://x/a.png", true},
+		{`{"event":"message","message":"mera","tags":["from-laptop"]}`, "", "", false},
+		{`{"event":"message","message":"phone","tags":["other"]}`, "phone", "", true},
 		{`{"event":"open"}`, "", "", false},
 		{`{"event":"keepalive"}`, "", "", false},
 		{`{"event":"message","message":""}`, "", "", false},
@@ -48,5 +50,17 @@ func TestToPNG(t *testing.T) {
 	}
 	if _, err := toPNG([]byte("garbage")); err == nil {
 		t.Error("garbage pe error aana chahiye")
+	}
+}
+
+func TestParseCopiedFiles(t *testing.T) {
+	in := "copy\nfile:///home/a/My%20File.pdf\nfile:///tmp/x.txt\r\nnot-a-uri\n"
+	got := parseCopiedFiles(in)
+	want := []string{"/home/a/My File.pdf", "/tmp/x.txt"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("parseCopiedFiles = %q want %q", got, want)
+	}
+	if len(parseCopiedFiles("copy")) != 0 {
+		t.Error("sirf action line pe koi path nahi aana chahiye")
 	}
 }
