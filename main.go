@@ -262,13 +262,24 @@ func toPNG(data []byte) ([]byte, error) {
 	}
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return magickPNG(data) // HEIC jaise formats ke liye
 	}
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// ImageMagick (heic support wala) se png banao
+func magickPNG(data []byte) ([]byte, error) {
+	cmd := exec.Command("convert", "-", "png:-")
+	cmd.Stdin = bytes.NewReader(data)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("decode fail (imagemagick heic support chahiye): %w", err)
+	}
+	return out, nil
 }
 
 var _ = []any{gif.Decode, jpeg.Decode} // decoder register hone ke liye
