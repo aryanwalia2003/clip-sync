@@ -16,6 +16,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -205,6 +206,7 @@ type event struct {
 }
 
 type attachment struct {
+	Name string `json:"name"`
 	Type string `json:"type"`
 	URL  string `json:"url"`
 }
@@ -252,7 +254,30 @@ func apply(ev event) error {
 	case strings.HasPrefix(ev.Att.Type, "text/"):
 		return writeClip(string(data))
 	}
-	return fmt.Errorf("unsupported attachment type %q", ev.Att.Type)
+	return saveFileToClip(ev.Att.Name, data)
+}
+
+// baaki files (pdf etc) ~/Downloads/clipsync mein save, clipboard mein "copied file"
+func saveFileToClip(name string, data []byte) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, "Downloads", "clipsync")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	// naam ka basename + timestamp, taaki purani file overwrite na ho
+	name = filepath.Base(name)
+	ext := filepath.Ext(name)
+	path := filepath.Join(dir, fmt.Sprintf("%s-%d%s", strings.TrimSuffix(name, ext), time.Now().Unix(), ext))
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return err
+	}
+	u := url.URL{Scheme: "file", Path: path}
+	cmd := exec.Command("xclip", "-selection", "clipboard", "-t", "x-special/gnome-copied-files", "-i")
+	cmd.Stdin = strings.NewReader("copy\n" + u.String())
+	return cmd.Run()
 }
 
 // png/jpeg/gif ko png bana do, xclip apps png hi maante hain
