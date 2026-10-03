@@ -37,4 +37,6 @@ Topic kisi se share mat karo, wahi secret hai.
 
 - iOS background mein clipboard read/write nahi karne deta, isliye phone side pe ek gesture lagta hai.
 - Jo bhejte ho wo plaintext hai (TLS ke saath) aur ntfy.sh pe ~12h cache rehta hai. Isliye sirf hotkey se wahi bhejo jo share karna hai.
-- Sirf text, max 4096 bytes. Wayland pe `xclip` ki jagah `wl-clipboard` chahiye (abhi supported nahi).
+- Text max 4096 bytes. Images (PNG/JPEG, max 15MB) bhi chalte hain, ntfy attachment ban ke jaate hain. Phone se JPEG/GIF aaye to laptop pe PNG mein convert hoke clipboard mein jata hai. HEIC abhi supported nahi (log mein error aata hai).
+- Laptop -> phone image: ntfy app mein image aati hai, kholke Share -> Copy (ya Save to Photos). Kuch bhi phone clipboard mein apne aap nahi jata.
+- Wayland pe `xclip` ki jagah `wl-clipboard` chahiye (abhi supported nahi).

@@ -9,6 +9,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -40,6 +45,15 @@ func main() {
 
 // hotkey se chalta hai, sirf jaan-boojh ke bhejna
 func send(topic string) error {
+	for _, t := range []struct{ mime, name string }{{"image/png", "clip.png"}, {"image/jpeg", "clip.jpg"}} {
+		if hasTarget(t.mime) {
+			img, err := exec.Command("xclip", "-selection", "clipboard", "-t", t.mime, "-o").Output()
+			if err != nil {
+				return err
+			}
+			return publishFile(topic, t.name, img)
+		}
+	}
 	cur := readClip()
 	if cur == "" {
 		return fmt.Errorf("clipboard khali hai")
@@ -88,8 +102,52 @@ func writeClip(s string) error {
 	return cmd.Run()
 }
 
+// clipboard mein ye target hai ya nahi
+func hasTarget(mime string) bool {
+	out, err := exec.Command("xclip", "-selection", "clipboard", "-t", "TARGETS", "-o").Output()
+	if err != nil {
+		return false
+	}
+	for _, l := range strings.Fields(string(out)) {
+		if l == mime {
+			return true
+		}
+	}
+	return false
+}
+
+func writeImage(png []byte) error {
+	cmd := exec.Command("xclip", "-selection", "clipboard", "-t", "image/png", "-i")
+	cmd.Stdin = bytes.NewReader(png)
+	return cmd.Run()
+}
+
+// ntfy attachment limit 15MB
+const maxFile = 15 << 20
+
+func publishFile(topic, name string, data []byte) error {
+	if len(data) > maxFile {
+		return fmt.Errorf("image %d bytes, limit %d", len(data), maxFile)
+	}
+	req, err := http.NewRequest(http.MethodPut, *server+"/"+topic, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Filename", name)
+	return do(req)
+}
+
 func publish(topic, text string) error {
-	resp, err := http.Post(*server+"/"+topic, "text/plain", strings.NewReader(text))
+	req, err := http.NewRequest(http.MethodPost, *server+"/"+topic, strings.NewReader(text))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	return do(req)
+}
+
+func do(req *http.Request) error {
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -130,28 +188,87 @@ func stream(topic string) error {
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
-		msg, ok := parseEvent(sc.Bytes())
+		ev, ok := parseEvent(sc.Bytes())
 		if !ok {
 			continue
 		}
-		if err := writeClip(msg); err != nil {
+		if err := apply(ev); err != nil {
 			log.Printf("clipboard write fail: %v", err)
 		}
 	}
 	return sc.Err()
 }
 
-// json line se sirf asli message nikalo (open/keepalive ignore)
-func parseEvent(line []byte) (string, bool) {
+type event struct {
+	Message string
+	Att     *attachment
+}
+
+type attachment struct {
+	Type string `json:"type"`
+	URL  string `json:"url"`
+}
+
+// json line se asli message/attachment nikalo (open/keepalive ignore)
+func parseEvent(line []byte) (event, bool) {
 	var ev struct {
-		Event   string `json:"event"`
-		Message string `json:"message"`
+		Event      string      `json:"event"`
+		Message    string      `json:"message"`
+		Attachment *attachment `json:"attachment"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(line), &ev); err != nil {
-		return "", false
+		return event{}, false
 	}
-	if ev.Event != "message" || ev.Message == "" {
-		return "", false
+	if ev.Event != "message" || (ev.Message == "" && ev.Attachment == nil) {
+		return event{}, false
 	}
-	return ev.Message, true
+	return event{ev.Message, ev.Attachment}, true
 }
+
+// text seedha, attachment download karke clipboard mein
+func apply(ev event) error {
+	if ev.Att == nil {
+		return writeClip(ev.Message)
+	}
+	resp, err := http.Get(ev.Att.URL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("attachment status %s", resp.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFile))
+	if err != nil {
+		return err
+	}
+	switch {
+	case strings.HasPrefix(ev.Att.Type, "image/"):
+		p, err := toPNG(data)
+		if err != nil {
+			return fmt.Errorf("%s: %w", ev.Att.Type, err) // HEIC jaisa format
+		}
+		return writeImage(p)
+	case strings.HasPrefix(ev.Att.Type, "text/"):
+		return writeClip(string(data))
+	}
+	return fmt.Errorf("unsupported attachment type %q", ev.Att.Type)
+}
+
+// png/jpeg/gif ko png bana do, xclip apps png hi maante hain
+func toPNG(data []byte) ([]byte, error) {
+	if bytes.HasPrefix(data, []byte("\x89PNG")) {
+		return data, nil
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+var _ = []any{gif.Decode, jpeg.Decode} // decoder register hone ke liye
